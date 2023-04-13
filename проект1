@@ -1,0 +1,170 @@
+import threading
+from tensorflow.keras.models import load_model
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+from tensorflow.keras.preprocessing.image import img_to_array
+import face_recognition
+import numpy as np
+import imutils
+import time
+import cv2
+import os
+
+finished = False
+frame = None
+gray = None
+faces = None
+masks = None
+faces_results = None
+scale = 2
+
+def init(filename, face_model, mask_model):
+    face_detector = cv2.CascadeClassifier(face_model)
+    video = cv2.VideoCapture(filename)
+    mask_net = load_model(mask_model)
+    return video, face_detector, mask_net
+
+def init_faces():
+
+    julia_image = face_recognition.load_image_file("data\\Julia.jpg")
+    julia_face_encoding = face_recognition.face_encodings(julia_image)[0]
+
+    vitaly_image = face_recognition.load_image_file("data\\Vitaly.jpg")
+    vitaly_face_encoding = face_recognition.face_encodings(vitaly_image)[0]
+
+    irina_image = face_recognition.load_image_file("data\\irina.jpg")
+    irina_face_encoding = face_recognition.face_encodings(irina_image)[0]
+
+    vika_image = face_recognition.load_image_file("data\\Vika.jpg")
+    vika_face_encoding = face_recognition.face_encodings(vika_image)[0]
+
+    known_face_encodings = [
+        vika_face_encoding,
+        julia_face_encoding,
+        vitaly_face_encoding,
+        irina_face_encoding
+        
+    ]
+    known_face_names = [
+        "Vika",
+        "Julia",
+        "Vitaly",
+        "Irina"
+    ]
+    return known_face_encodings, known_face_names
+
+def find_masks(image, faces):
+    global mask_net
+
+    results = [False] * len(faces)
+
+    if len(faces) > 0:
+        for i, face in enumerate(faces):
+            x, y, w, h = face
+            _face = image[y:y+h, x:x+w]
+            _face = cv2.cvtColor(_face, cv2.COLOR_BGR2RGB)
+            _face = cv2.resize(_face, (224, 224))
+            _face = img_to_array(_face)
+            _face = preprocess_input(_face)
+            _face = np.expand_dims(_face, axis=0)
+            predict = mask_net.predict(_face)
+            mask, no_mask = predict[0]
+            results[i] = (mask > no_mask) and mask >= 0.8
+
+    return results
+
+def find_names(image, faces):
+    global known_face_encodings
+    global known_face_names
+
+    img_h, img_w = image.shape[:2]
+    results = [False] * len(faces)
+
+    if len(faces) > 0:
+        _faces = []
+        for i, face in enumerate(faces):
+            x, y, w, h = face
+            b = w // 10
+            x1, y1 = max(0, x - b), max(0, y - b)
+            x2, y2 = min(img_w, x + w + b), min(img_h, y + h + b)
+            _face = image[y1:y2, x1:x2]
+            _face = cv2.cvtColor(_face, cv2.COLOR_BGR2RGB)
+            # Find all the faces and face encodings in the current frame of video
+            face_locations = face_recognition.face_locations(_face)
+            face_encodings = face_recognition.face_encodings(_face, face_locations)
+            
+            results[i] = ""
+
+            if len(face_encodings) > 0:
+                face_encoding = face_encodings[0]
+                matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+                if True in matches:
+                    first_match_index = matches.index(True)
+                    results[i] = known_face_names[first_match_index]
+
+    return results
+
+def detect_faces():
+    global finished
+    global image
+    global gray
+    global faces
+    global masks
+    global face_detector
+    global faces_results
+    global scale
+
+    min_face = int(80 / scale)
+    max_face = int(200 / scale)
+    while True:
+        if finished:
+            break
+        if gray is not None and image is not None:
+            faces = face_detector.detectMultiScale(
+                gray, 1.15, 2, minSize=(min_face, min_face), maxSize=(max_face, max_face))
+            masks = find_masks(image, faces)
+            names = find_names(image, faces)
+            faces_results = []
+            for i, face in enumerate(faces):
+                x, y, w, h = face
+                mask = masks[i]
+                name = names[i]
+                faces_results.append((x, y, w, h, mask, name))
+
+thread = threading.Thread(target=detect_faces, args=())
+thread.start()
+
+video, face_detector, mask_net = init(
+    "data\\test.mkv",
+    "models\\haar.xml",
+    "models\\mask_detector.model")
+
+known_face_encodings, known_face_names = init_faces()
+
+
+
+
+
+while True:
+    # Read the input image
+    success, frame = video.read()
+    if not success:
+        break
+    frame = imutils.resize(frame, width=int(frame.shape[1] / scale))
+    image = frame.copy()
+    # Convert into grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # Detect faces
+    # Draw rectangle around the faces
+    if faces_results is not None:
+        for face in faces_results:
+            x, y, w, h, mask, name = face
+            color = (0, 255, 0) if mask else (0, 0, 255)
+            cv2.rectangle(image, (x, y), (x+w, y+h), color, 2)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(image, name, (x, y + h + 20), font, 0.75, (255, 255, 255), 2)
+    # Display the output
+    cv2.imshow('Mask Detection', image)
+    if cv2.waitKey(1) == ord('q'):
+        break
+
+finished = True
